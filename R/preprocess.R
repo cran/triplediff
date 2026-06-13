@@ -4,6 +4,60 @@
 #' @export
 NULL
 #--------------------------------------------------
+# Helper function to check partition-specific collinearity
+# Returns a list with:
+#   - collinear_vars: named list mapping dropped variables to the partition(s) where they're collinear
+#   - all_collinear: vector of all variables that should be dropped globally
+check_partition_collinearity <- function(data, subgroup_col, cov_cols, tol = 1e-6) {
+  # Get unique subgroups (should be 1, 2, 3, 4)
+  subgroups <- sort(unique(data[[subgroup_col]]))
+
+  # We check comparisons: 4 vs 3, 4 vs 2, 4 vs 1
+  # These are the partitions used in the DDD estimation
+  comparison_groups <- subgroups[subgroups < 4]
+
+  # Track which variables are collinear in which partition
+  partition_collinear <- list()
+
+  for (comp_group in comparison_groups) {
+    # Subset data to subgroup 4 and the comparison group
+    subset_data <- data[data[[subgroup_col]] %in% c(4, comp_group), ]
+
+    # Get covariate matrix for this subset
+    cov_subset <- as.matrix(subset_data[, cov_cols, with = FALSE])
+
+    # Skip if no observations (shouldn't happen, but be safe)
+    if (nrow(cov_subset) == 0) next
+
+    # Use QR decomposition to detect collinearity
+    qr_subset <- qr(cov_subset, tol = tol)
+    rank_subset <- qr_subset$rank
+
+    # Get indices of linearly independent columns
+    non_collinear_indices <- qr_subset$pivot[seq_len(rank_subset)]
+
+    # Find collinear variables in this subset
+    collinear_in_subset <- setdiff(cov_cols, cov_cols[non_collinear_indices])
+
+    if (length(collinear_in_subset) > 0) {
+      partition_name <- paste0("subgroup 4 vs ", comp_group)
+      for (var in collinear_in_subset) {
+        if (is.null(partition_collinear[[var]])) {
+          partition_collinear[[var]] <- partition_name
+        } else {
+          partition_collinear[[var]] <- c(partition_collinear[[var]], partition_name)
+        }
+      }
+    }
+  }
+
+  return(list(
+    collinear_vars = partition_collinear,
+    all_collinear = names(partition_collinear)
+  ))
+}
+
+#--------------------------------------------------
 # Function to pre-process the data to use on ddd estimator
 
 run_nopreprocess_2periods <- function(yname,
@@ -159,7 +213,7 @@ run_nopreprocess_2periods <- function(yname,
         warning("Panel is unbalanced. Treating as repeated cross-sections (allow_unbalanced_panel = TRUE).")
       } else {
         # Balance the panel by dropping units
-        dta <- BMisc::makeBalancedPanel(dta, idname, tname)
+        dta <- BMisc::make_balanced_panel(dta, idname, tname)
         n <- uniqueN(dta[[idname]])
         row_new <- dta[, .N]
         row_diff <- row_orig - row_new
@@ -253,12 +307,47 @@ run_nopreprocess_2periods <- function(yname,
   rank_m <- qr_m$rank
   # Get the indices of the non-collinear columns
   non_collinear_indices <- qr_m$pivot[seq_len(rank_m)]
+  # Check if any covariates were dropped due to global collinearity (following DRDID approach)
+  dropped_covariates_global <- setdiff(colnames(cov_m), colnames(cov_m)[non_collinear_indices])
+  if (length(dropped_covariates_global) > 0) {
+    warning("The following covariates were dropped due to global collinearity: ", paste(dropped_covariates_global, collapse = ", "))
+  }
   # Drop the collinear columns from the data.table
   cleaned_data <- cleaned_data[, c(seq(1,idx_static_vars,1), non_collinear_indices + idx_static_vars), with = FALSE]
 
   # drop the intercept
   #cleaned_data[, (idx_static_vars+1) := NULL]
   cleaned_data[, "(Intercept)" := NULL]
+
+  # Check for partition-specific collinearity (after global check)
+  # Get remaining covariate column names (excluding static vars)
+  cov_cols_remaining <- setdiff(names(cleaned_data), c("id", "y", "post", "treat", "period", "partition", "weights", "cluster", "subgroup"))
+  if (length(cov_cols_remaining) > 0) {
+    partition_check <- check_partition_collinearity(cleaned_data, "subgroup", cov_cols_remaining)
+
+    if (length(partition_check$all_collinear) > 0) {
+      # Build informative warning message
+      partition_warnings <- sapply(names(partition_check$collinear_vars), function(var) {
+        partitions <- paste(partition_check$collinear_vars[[var]], collapse = ", ")
+        paste0("  - ", var, " (collinear in: ", partitions, ")")
+      })
+      warning("The following covariates were dropped due to partition-specific collinearity:\n",
+              paste(partition_warnings, collapse = "\n"))
+
+      # Drop these covariates globally
+      cols_to_keep <- setdiff(names(cleaned_data), partition_check$all_collinear)
+      cleaned_data <- cleaned_data[, ..cols_to_keep]
+    }
+  }
+
+  # Update xformula to reflect dropped covariates (following DRDID approach)
+  # Get final covariate column names after all collinearity checks
+  final_cov_cols <- setdiff(names(cleaned_data), c("id", "y", "post", "treat", "period", "partition", "weights", "cluster", "subgroup"))
+  if (length(final_cov_cols) > 0) {
+    xformla <- stats::as.formula(paste("~", paste(final_cov_cols, collapse = " + ")))
+  } else {
+    xformla <- ~1
+  }
 
   out <- list(preprocessed_data = cleaned_data,
               xformula = xformla,
@@ -487,7 +576,7 @@ run_preprocess_2Periods <- function(yname,
         warning("Panel is unbalanced. Proceeding as such.")
       } else {
         # Balance the panel by dropping units
-        dta <- BMisc::makeBalancedPanel(dta, idname, tname)
+        dta <- BMisc::make_balanced_panel(dta, idname, tname)
         n <- uniqueN(dta[[idname]])
         row_new <- dta[, .N]
         row_diff <- row_orig - row_new
@@ -564,7 +653,7 @@ run_preprocess_2Periods <- function(yname,
   # Flag for small groups for inference
   # Calculate the size of each group in the 'treat' column
   # Subset 'gsize' to get the small groups based on "required size"
-  gsize <- cleaned_data[, if(.N < length(BMisc::rhs.vars(xformla)) + 5) .N, by = "treat"]
+  gsize <- cleaned_data[, if(.N < length(BMisc::rhs_vars(xformla)) + 5) .N, by = "treat"]
   # If there are any small groups, stop execution and print an error message
   if (nrow(gsize) > 0) {
     stop("Either treatment or the comparison group in your dataset is very small. Inference is not feasible.")
@@ -603,11 +692,46 @@ run_preprocess_2Periods <- function(yname,
   rank_m <- qr_m$rank
   # Get the indices of the non-collinear columns
   non_collinear_indices <- qr_m$pivot[seq_len(rank_m)]
+  # Check if any covariates were dropped due to global collinearity (following DRDID approach)
+  dropped_covariates_global <- setdiff(colnames(cov_m), colnames(cov_m)[non_collinear_indices])
+  if (length(dropped_covariates_global) > 0) {
+    warning("The following covariates were dropped due to global collinearity: ", paste(dropped_covariates_global, collapse = ", "))
+  }
   # Drop the collinear columns from the data.table
   cleaned_data <- cleaned_data[, c(seq(1,idx_static_vars,1), non_collinear_indices + idx_static_vars), with = FALSE]
 
   # drop the intercept
   cleaned_data[, "(Intercept)" := NULL]
+
+  # Check for partition-specific collinearity (after global check)
+  # Get remaining covariate column names (excluding static vars)
+  cov_cols_remaining <- setdiff(names(cleaned_data), c("id", "y", "post", "treat", "period", "partition", "weights", "cluster", "subgroup"))
+  if (length(cov_cols_remaining) > 0) {
+    partition_check <- check_partition_collinearity(cleaned_data, "subgroup", cov_cols_remaining)
+
+    if (length(partition_check$all_collinear) > 0) {
+      # Build informative warning message
+      partition_warnings <- sapply(names(partition_check$collinear_vars), function(var) {
+        partitions <- paste(partition_check$collinear_vars[[var]], collapse = ", ")
+        paste0("  - ", var, " (collinear in: ", partitions, ")")
+      })
+      warning("The following covariates were dropped due to partition-specific collinearity:\n",
+              paste(partition_warnings, collapse = "\n"))
+
+      # Drop these covariates globally
+      cols_to_keep <- setdiff(names(cleaned_data), partition_check$all_collinear)
+      cleaned_data <- cleaned_data[, ..cols_to_keep]
+    }
+  }
+
+  # Update xformula to reflect dropped covariates (following DRDID approach)
+  # Get final covariate column names after all collinearity checks
+  final_cov_cols <- setdiff(names(cleaned_data), c("id", "y", "post", "treat", "period", "partition", "weights", "cluster", "subgroup"))
+  if (length(final_cov_cols) > 0) {
+    xformla <- stats::as.formula(paste("~", paste(final_cov_cols, collapse = " + ")))
+  } else {
+    xformla <- ~1
+  }
 
   out <- list(preprocessed_data = cleaned_data,
               xformula = xformla,
@@ -739,21 +863,6 @@ run_preprocess_multPeriods <- function(yname,
       }
     }
 
-    # check if bootstrap is on
-    if (!boot){
-      warning("Clustered SEs are only available when boot=TRUE. Setting boot=TRUE and cband=TRUE for bootstrapped standard errors.")
-      boot <- TRUE
-      args$boot <- boot
-      cband <- TRUE
-      args$cband <- cband
-
-      # adding boot reps too
-      if (is.null(nboot)){
-        warning("Number of bootstrap samples not specified. Defaulting to 999 reps.")
-        nboot <- 999
-        args$nboot <- nboot
-      }
-    }
   }
 
   # Flag for parallel and cores
@@ -930,7 +1039,7 @@ run_preprocess_multPeriods <- function(yname,
       } else {
         warning("Panel is unbalanced but allow_unbalanced_panel = FALSE. Forcing to convert data to balanced panel.")
         # Balance the panel by dropping units
-        dta <- BMisc::makeBalancedPanel(dta, idname, tname)
+        dta <- BMisc::make_balanced_panel(dta, idname, tname)
         n <- uniqueN(dta[[idname]])
         row_new <- dta[, .N]
         row_diff <- row_orig - row_new
@@ -1013,7 +1122,7 @@ run_preprocess_multPeriods <- function(yname,
   }
 
   # Calculate the required size
-  reqsize <- length(BMisc::rhs.vars(xformla)) + 5
+  reqsize <- length(BMisc::rhs_vars(xformla)) + 5
   # Identify groups to warn about
   small_groups <- gsize[N < reqsize]
   # Warn if some groups are small
@@ -1037,8 +1146,44 @@ run_preprocess_multPeriods <- function(yname,
                                                             data = dta,
                                                             na.action = na.pass))
   }
+
+  # Remove collinear variables (following DRDID approach)
+  # Determine the number of static columns (before covariates)
+  # Static cols: id, y, first_treat, period, partition, weights, [cluster]
+  idx_static_vars <- ifelse(is.null(cluster), 6, 7)
+
+  # Convert the covariate columns (including intercept) to a matrix
+  cov_m <- as.matrix(cleaned_data[, -c(1:idx_static_vars), with = FALSE])
+
+  # Only check for collinearity if there are covariates beyond the intercept
+  if (ncol(cov_m) > 1) {
+    # Use the qr() function to detect collinear columns
+    qr_m <- qr(cov_m, tol = 1e-6)
+    # Get the rank of the matrix
+    rank_m <- qr_m$rank
+    # Get the indices of the non-collinear columns
+    non_collinear_indices <- qr_m$pivot[seq_len(rank_m)]
+    # Check if any covariates were dropped due to global collinearity
+    dropped_covariates_global <- setdiff(colnames(cov_m), colnames(cov_m)[non_collinear_indices])
+    if (length(dropped_covariates_global) > 0) {
+      warning("The following covariates were dropped due to global collinearity: ", paste(dropped_covariates_global, collapse = ", "))
+    }
+    # Drop the collinear columns from the data.table
+    cleaned_data <- cleaned_data[, c(seq(1, idx_static_vars, 1), non_collinear_indices + idx_static_vars), with = FALSE]
+  }
+
   # drop the intercept
   cleaned_data[, "(Intercept)" := NULL]
+
+  # Update xformula to reflect dropped covariates (following DRDID approach)
+  # Get final covariate column names after collinearity check
+  # Static cols in multi-period: id, y, first_treat, period, partition, weights, [cluster]
+  final_cov_cols <- setdiff(names(cleaned_data), c("id", "y", "first_treat", "period", "partition", "weights", "cluster"))
+  if (length(final_cov_cols) > 0) {
+    xformla <- stats::as.formula(paste("~", paste(final_cov_cols, collapse = " + ")))
+  } else {
+    xformla <- ~1
+  }
 
   # order dataset wrt idname and tname
   setorder(cleaned_data, "id", "period")
@@ -1075,8 +1220,8 @@ run_preprocess_multPeriods <- function(yname,
 #' @keywords internal
 #' @export
 process_attgt <- function(attgt_list){
-  groups <- length(unique(unlist(BMisc::getListElement(attgt_list, "group"))))
-  time_periods <- length(unique(unlist(BMisc::getListElement(attgt_list, "year"))))
+  groups <- length(unique(unlist(BMisc::get_list_element(attgt_list, "group"))))
+  time_periods <- length(unique(unlist(BMisc::get_list_element(attgt_list, "year"))))
 
   # empty vectors to hold results
   group <- c()

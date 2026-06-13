@@ -1,6 +1,6 @@
 Package: triplediff
 Title: Triple-Difference Estimators
-Version: 0.2.0
+Version: 0.2.4
 Authors@R: c(person("Marcelo", "Ortiz-Villavicencio", email = "marcelo.ortiz@emory.edu", role = c("aut", "cre")),
               person("Pedro H. C.", "Sant'Anna", email = "pedro.santanna@emory.edu", role = c("aut"))
             )
@@ -15,16 +15,16 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.3)
 RoxygenNote: 7.3.3
-Imports: BMisc (>= 1.4.6), data.table (>= 1.15.0), fastglm (>= 0.0.3),
+Imports: BMisc (>= 1.4.9), data.table (>= 1.15.0), fastglm (>= 0.0.3),
         Matrix (>= 1.6.1), parallel (>= 1.4.0), Rcpp (>= 1.0.12)
 LinkingTo: Rcpp (>= 1.0.12)
 Suggests: testthat (>= 3.0.0)
 Config/testthat/edition: 3
 URL: http://marcelortiz.com/triplediff/
 NeedsCompilation: yes
-Packaged: 2026-01-15 22:43:36 UTC; marcelortizv
+Packaged: 2026-06-13 20:03:54 UTC; marcelortiz
 Author: Marcelo Ortiz-Villavicencio [aut, cre],
   Pedro H. C. Sant'Anna [aut]
 Maintainer: Marcelo Ortiz-Villavicencio <marcelo.ortiz@emory.edu>
 Repository: CRAN
-Date/Publication: 2026-01-16 01:40:02 UTC
+Date/Publication: 2026-06-13 20:20:02 UTC
